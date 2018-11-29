@@ -7,16 +7,18 @@ die() {
 
 usage() {
 	cat <<- EOF
-	Usage: SOURCE_URI=[uri] ./cargo-recipe.sh [options] category/portname
+	Usage: ./cargo-recipe.sh [options] URI category/port
 
-	Outputs the SOURCE_URI's and CHECKSUM_SHA256's of a Rust package's
-	dependencies from crates.io.
+	Creates a recipe template for a crates.io package, filled with
+	information at hand.
 
 	Options:
 	  -h, --help	show this help message and exit
 	  -k, --keep	keep the generated temporary directory
 	  -psd, --print-source-directories
 	 		also print SOURCE_DIR's
+	  -c, --cmd=
+	 		specify the command runtime
 	EOF
 }
 
@@ -26,7 +28,7 @@ psd=2
 args=1
 while (( args > 0 )); do
 	case "$1" in
-		""|-h|--help )
+		""|-h|--help)
 			usage
 			exit 0
 			;;
@@ -38,7 +40,22 @@ while (( args > 0 )); do
 			psd=3
 			shift
 			;;
+		-c)
+			cmd="$2"
+			shift
+			shift
+			;;
+		--cmd=*)
+			cmd="${1#*=}"
+			shift
+			;;
+		*://*)
+			SOURCE_URI="$1"
+			shift
+			;;
 		*)
+			[[ "$1" = *-*/* ]] ||
+				usage=1 die "Invalid category/portname"
 			. ~/config/settings/haikuports.conf
 			directory="$TREE_PATH"/"$1"
 			portName=$(sed 's/-/_/g' <<< "${1#*/}")
@@ -53,14 +70,22 @@ cd "$directory" || die "Invalid port directory."
 tempdir=$(mktemp -d "$portName".XXXXXX --tmpdir=/tmp)
 trap '{ cd $OLDPWD; keep; trap - 0 RETURN; }' EXIT RETURN
 
-case "" in
-	$SOURCE_URI)
-		usage=1 die "SOURCE_URI is not set."
-		;;
-	$SOURCE_FILENAME)
-		SOURCE_FILENAME=$(basename "$SOURCE_URI")
-		;;
-esac
+while true; do
+	case "" in
+		$SOURCE_URI)
+			usage=1 die "SOURCE_URI is not set."
+			;;
+		$SOURCE_FILENAME)
+			SOURCE_FILENAME=$(basename "$SOURCE_URI")
+			;;
+		$cmd)
+			cmd="$portName"
+			;;
+		*)
+			break
+			;;
+	esac
+done
 
 wget -O download/"$SOURCE_FILENAME" "$SOURCE_URI"
 for ((i=0; i<3; i++)); do
@@ -103,17 +128,15 @@ done
 
 toml="$tempdir"/Cargo.toml
 eval "$(sed -n '/\[package\]/,/^$/ {/"""\|\[/d; s/ = /=/p}' "$toml")"
-extended_description=$(
+cat << end-of-file > "$tempdir"/"$portName"-"$version".recipe
+SUMMARY="$(sed 's/\.$//' <<< "$description")"
+DESCRIPTION="$(
 	sed -n "/$(grep -o extended- "$toml")description"' = """/,/"""/ {
 		s/.* """//
 		/"""/d
 		p
 	}' "$toml"
-)
-
-cat << end-of-file > "$tempdir"/"$portName"-"$version".recipe
-SUMMARY="$(sed 's/\.$//' <<< "$description")"
-DESCRIPTION="$extended_description"
+)"
 HOMEPAGE="$homepage"
 COPYRIGHT=""
 LICENSE="$(sed 's,/\| OR ,\n\t,; s,-2.0, v2,' <<< "$license")"
@@ -136,7 +159,7 @@ fi
 
 PROVIDES="
 	$portName\$secondaryArchSuffix = \$portVersion
-	cmd:$portName
+	cmd:$cmd
 	"
 REQUIRES="
 	haiku\$secondaryArchSuffix
@@ -151,7 +174,7 @@ BUILD_PREREQUIRES="
 	"
 
 defineDebugInfoPackage $portName\$secondaryArchSuffix \\
-	\$commandBinDir/$portName
+	\$commandBinDir/$cmd
 
 BUILD()
 {
@@ -184,7 +207,7 @@ BUILD()
 
 INSTALL()
 {
-	install -D -m755 -t \$commandBinDir target/release/$portName
+	install -D -m755 -t \$commandBinDir target/release/$cmd
 	install -D -m644 -t \$docDir README.md
 }
 
