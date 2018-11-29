@@ -51,11 +51,7 @@ done
 mkdir -p "$directory"/download
 cd "$directory" || die "Invalid port directory."
 tempdir=$(mktemp -d "$portName".XXXXXX --tmpdir=/tmp)
-trap "{ cd $OLDPWD; keep; }" EXIT RETURN
-
-#port=${recipe%.*}
-#portName=${port%-*}
-#portVersion=${port##*-}
+trap '{ cd $OLDPWD; keep; trap - 0 RETURN; }' EXIT RETURN
 
 case "" in
 	$SOURCE_URI)
@@ -85,61 +81,51 @@ info=$(
 		s/ = //
 		s/"//g' "$tempdir"/Cargo.lock
 )
-crates=$(awk '{ print $1".crate" }' <<< "$info")
-checksums=$(awk '{ print $2 }' <<< "$info")
-numbers=$(seq 2 $(($(wc -l <<< "$info") + 1)))
-
-uris=$(
-	for crate in $crates; do
+mapfile -t crates < <(awk '{ print $1".crate" }' <<< "$info")
+mapfile -t checksums < <(awk '{ print $2 }' <<< "$info")
+mapfile -t uris < <(
+	for crate in "${crates[@]}"; do
 		echo "https://static.crates.io/crates/${crate%-*}/$crate"
 	done
 )
-source_uris=$(
-	for i in $numbers; do
-		echo SOURCE_URI_$i=\""$(sed "$((i-1))q;d" <<< "$uris")"\"
-	done
-)
-checksums_sha256=$(
-	for i in $numbers; do
-		j=$((i - 1))
-		echo CHECKSUM_SHA256_$i=\""$(sed "${j}q;d" <<< "$checksums")"\"
-	done
-)
-source_dirs=$(
-	eval "$source_uris"
-	for i in $numbers; do
-		eval source_uri=\$SOURCE_URI_$i
-		source_filename=$(basename --suffix=.crate "$source_uri")
-		echo SOURCE_DIR_$i=\""$source_filename"\"
-	done
+
+unset source_uris checksums_sha256 source_dirs merged
+for i in $(seq 0 $(($(wc -l <<< "$info") - 1))); do
+	j=$((i + 2))
+	source_uris+=( "SOURCE_URI_$j=\"${uris[i]}\"" )
+	checksums_sha256+=( "CHECKSUM_SHA256_$j=\"${checksums[i]}\"" )
+	[ "$psd" = 3 ] && source_dirs+=("$(
+		source_filename=$(basename --suffix=.crate "${source_uris[i]}")
+		echo SOURCE_DIR_$j=\""$source_filename"\"
+	)")
+	merged+=( ${source_uris[i]} ${checksums_sha256[i]} ${source_dirs[i]} )
+done
+
+toml="$tempdir"/Cargo.toml
+eval "$(sed -n '/\[package\]/,/^$/ {/"""\|\[/d; s/ = /=/p}' "$toml")"
+extended_description=$(
+	sed -n "/$(grep -o extended- "$toml")description"' = """/,/"""/ {
+		s/.* """//
+		/"""/d
+		p
+	}' "$toml"
 )
 
-merged=$(paste -d \\n <(echo "$source_uris") <(echo "$checksums_sha256"))
-if [ "$psd" = 3 ]; then
-	for i in $numbers; do
-		merged=$(
-			echo "$merged" | sed "/CHECKSUM_SHA256_$i=\".*\"/a \
-				$(sed "$((i-1))q;d" <<< "$source_dirs")"
-		)
-	done
-fi
-
-eval "$(sed -n '/package/,/^$/{s/ = /=/p}' "$tempdir"/Cargo.toml)"
 cat << end-of-file > "$tempdir"/"$portName"-"$version".recipe
 SUMMARY="$(sed 's/\.$//' <<< "$description")"
-DESCRIPTION=""
+DESCRIPTION="$extended_description"
 HOMEPAGE="$homepage"
 COPYRIGHT=""
-LICENSE="$(sed 's|/|\n\t|; s|-2.0| v2|' <<< "$license")"
+LICENSE="$(sed 's,/\| OR ,\n\t,; s,-2.0, v2,' <<< "$license")"
 REVISION="1"
 SOURCE_URI="$(
 	sed -e "s|$homepage|\$HOMEPAGE|
 		s|$version|\$portVersion|" <<< "$SOURCE_URI"
 )"
 CHECKSUM_SHA256="$(sha256sum download/"$SOURCE_FILENAME" | cut -d\  -f1)"
-SOURCE_FILENAME="$SOURCE_FILENAME"
+SOURCE_FILENAME="$name-\$portVersion.tar.gz"
 
-$(echo "$merged" | sed '0~'"$psd"' a\\')
+$(printf '%s\n' "${merged[@]}" | sed '0~'"$psd"' a\\')
 
 ARCHITECTURES="!x86_gcc2 ?x86 x86_64"
 commandBinDir=\$binDir
@@ -149,7 +135,7 @@ commandBinDir=\$prefix/bin
 fi
 
 PROVIDES="
-	$portName = \$portVersion
+	$portName\$secondaryArchSuffix = \$portVersion
 	cmd:$portName
 	"
 REQUIRES="
@@ -159,8 +145,12 @@ REQUIRES="
 BUILD_REQUIRES="
 	haiku\${secondaryArchSuffix}_devel
 	"
+BUILD_PREREQUIRES="
+	cmd:cargo\$secondaryArchSuffix
+	cmd:gcc\$secondaryArchSuffix
+	"
 
-defineDebugInfoPackage $portName\$secondaryArchSuffix \
+defineDebugInfoPackage $portName\$secondaryArchSuffix \\
 	\$commandBinDir/$portName
 
 BUILD()
@@ -168,9 +158,9 @@ BUILD()
 	export CARGO_HOME=\$sourceDir/../cargo
 	CARGO_VENDOR=\$CARGO_HOME/haiku
 	mkdir -p \$CARGO_VENDOR
-	for i in {2..55}; do
-		eval temp=\$sourceDir\$i
-		eval shasum=\$CHECKSUM_SHA256_\$i
+	for i in {2..$(( $(wc -l <<< "$info") + 1 ))}; do
+		eval temp=\\\$sourceDir\$i
+		eval shasum=\\\$CHECKSUM_SHA256_\$i
 		pkg=\$(basename \$temp/*)
 		cp -r \$temp/\$pkg \$CARGO_VENDOR
 		cat <<- EOF > \$CARGO_VENDOR/\$pkg/.cargo-checksum.json
@@ -194,14 +184,14 @@ BUILD()
 
 INSTALL()
 {
-	install -D -m755 -t \$commandBinDir target/release/diskus
+	install -D -m755 -t \$commandBinDir target/release/$portName
 	install -D -m644 -t \$docDir README.md
 }
 
 TEST()
 {
-	export CARGO_HOME=\$sourceDir\$i/../cargo
-	cargo test --all
+	export CARGO_HOME=\$sourceDir/../cargo
+	cargo test --release
 }
 end-of-file
 mv -i "$tempdir"/"$portName"-"$version".recipe "$directory"
