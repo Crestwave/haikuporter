@@ -1,6 +1,6 @@
 #!/bin/bash
 die() {
-	printf '\e[31m%s\e[0m' "Error: " "${@+$@$'\n'}"
+	printf '\e[31m%s\e[0m' "${@+$'Error: '$@$'\n'}"
 	[ "$usage" = 1 ] && usage
 	exit 1
 } 1>&2
@@ -17,13 +17,16 @@ usage() {
 	  -k, --keep	keep the generated temporary directory
 	  -psd, --print-source-directories
 	 		also print SOURCE_DIR's
-	  -c, --cmd=
+	  -c, --cmd=[CMD]
 	 		specify the command runtime
+	  -b portname, --bump portname
+	 		bump the crates.io dependencies of the specified port
 	EOF
 }
 
 keep() { rm -rf "$tempdir"; }
 
+. ~/config/settings/haikuports.conf
 psd=2
 args=1
 while (( args > 0 )); do
@@ -40,35 +43,53 @@ while (( args > 0 )); do
 			psd=3
 			shift
 			;;
-		-c)
-			cmd="$2"
-			shift
+		-c|--cmd=*)
+			[ "$1" = -b ] && shift
+			cmd="${1#*=}"
 			shift
 			;;
-		--cmd=*)
-			cmd="${1#*=}"
+		-b|--bump)
+			[ "$1" = -b ] && shift
+			portName="${1#*=}"
+			directory=$(
+				find "$TREE_PATH" -mindepth 3 -maxdepth 3 \
+					-iname "$portName-*.*.recipe" |
+					awk 'FNR == 1 { gsub("/[^/]*$", "")
+							print }'
+			)
+			bump=1
 			shift
 			;;
 		*://*)
 			SOURCE_URI="$1"
 			shift
 			;;
-		*)
-			[[ "$1" = *-*/* ]] ||
-				usage=1 die "Invalid category/portname"
-			. ~/config/settings/haikuports.conf
+		*-*/*)
 			directory="$TREE_PATH"/"$1"
 			portName=$(sed 's/-/_/g' <<< "${1#*/}")
 			shift
 			;;
+		*)
+			usage=1 die "Invalid category/portname"
 	esac
 	args=$#
 done
 
 mkdir -p "$directory"/download
 cd "$directory" || die "Invalid port directory."
-tempdir=$(mktemp -d "$portName".XXXXXX --tmpdir=/tmp)
-trap '{ cd $OLDPWD; keep; trap - 0 RETURN; }' EXIT RETURN
+trap 'cd $OLDPWD; trap - RETURN' EXIT RETURN
+
+if [ "$bump" = 1 ]; then
+	set -- "$portName"*-*.recipe
+	eval "recipe=\${$#}"
+
+	portVersionedName=${recipe%.*}
+	portVersion=${portVersionedName##*-}
+
+	defineDebugInfoPackage() { :; }
+
+	eval "$(cat "$recipe")" || die "Sourcing the recipe file failed."
+fi
 
 while true; do
 	case "" in
@@ -78,8 +99,19 @@ while true; do
 		$SOURCE_FILENAME)
 			SOURCE_FILENAME=$(basename "$SOURCE_URI")
 			;;
+		$CHECKSUM_SHA256)
+			wget -O download/"$SOURCE_FILENAME" "$SOURCE_URI" ||
+				die "Invalid URI."
+			CHECKSUM_SHA256=1
+			;;
 		$cmd)
 			cmd="$portName"
+			;;
+		$portVersionedName)
+			portVersionedName="$portName"
+			;;
+		$SOURCE_DIR)
+			SOURCE_DIR="$portVersionedName"
 			;;
 		*)
 			break
@@ -87,16 +119,25 @@ while true; do
 	esac
 done
 
-wget -O download/"$SOURCE_FILENAME" "$SOURCE_URI"
+[ "$CHECKSUM_SHA256" = 1 ] ||
 for ((i=0; i<3; i++)); do
-	tar --transform "s|[^/]*|${tempdir##*/}|" -C /tmp \
+	echo "$CHECKSUM_SHA256  download/$SOURCE_FILENAME" | sha256sum -c \
+		&& break ||
+	((i<2)) && wget -O download/"$SOURCE_FILENAME" "$SOURCE_URI" \
+		"$( ((i<1)) && echo '-c' )"
+done || die "Checksum verification failed."
+
+tempdir=$(mktemp -d "$portName".XXXXXX --tmpdir=/tmp)
+trap 'cd $OLDPWD; keep; trap - RETURN' EXIT RETURN
+for ((i=0; i<3; i++)); do
+	tar --transform "s|$SOURCE_DIR[^/]*|${tempdir##*/}|" -C /tmp \
 		-xf download/"$SOURCE_FILENAME" --wildcards "$( ((i<2)) &&
-			echo "*/Cargo.*" )" && ((i<2)) && break
+			echo "$SOURCE_DIR*/Cargo.*" )" && ((i<2)) && break
 	((i>1)) && {
 		[ -n "$PATCHES" ] && patch -d "$tempdir" -i patches/"$PATCHES"
 		(cd "$tempdir" && cargo update)
 	}
-done
+done || die "Invalid tar archive."
 
 info=$(
 	sed -e '0,/\[metadata\]/d
@@ -125,6 +166,17 @@ for i in $(seq 0 $(($(wc -l <<< "$info") - 1))); do
 	)")
 	merged+=( ${source_uris[i]} ${checksums_sha256[i]} ${source_dirs[i]} )
 done
+
+if [ "$bump" = 1 ]; then
+	sed -i \
+		-e '/SOURCE_URI_2/,/ARCHITECTURES/ {/^A/!d}' \
+		-e "/^ARCHITECTURES/i $(printf '%s\n' "${merged[@]}" |
+			sed '0~'"$psd"' a\\' | head -n -1 |
+			sed -z 's/\n/\\n/g')" \
+		-e "s/{2\.\.[0-9][0-9]}/{2..$(( $(wc -l <<< "$info") + 1 ))}/" \
+		"$tempdir"/"$recipe"
+	exit
+fi
 
 toml="$tempdir"/Cargo.toml
 eval "$(sed -n '/\[package\]/,/^$/ {/"""\|\[/d; s/ = /=/p}' "$toml")"
