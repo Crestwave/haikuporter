@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 
 term() (
-	[ -z "$rc" ] && return $?
-	if [ "$rc" != 0 ]; then
+	[ -z $rc ] && return $?
+	if [ $rc -ne 0 ]; then
 		printf '%s' "${@+$'\e[31mError: \e[0m'$@$'\n'}" 1>&2
 	else
 		printf '%s' "${@+$@$'\n'}"
 	fi
-	[ "$usage" = 1 ] && eval "cat <<- EOF $([ "$rc" != 0 ] && echo "1>&2")
-	Usage: ./cargo-recipe.sh [options] URI category/port
+	[[ $usage -eq 1 ]] && eval "cat <<- EOF $([ $rc -ne 0 ] && echo "1>&2")
+	Usage: $0 [options] URI category/port
 
 	Creates a recipe template for a crates.io package, filled with
 	information at hand.
@@ -20,14 +20,14 @@ term() (
 	 		also print SOURCE_DIR's
 	  -c CMD, --cmd=CMD
 	 		specify the command runtime
-	  -b port, --bump port
+	  -b PORT, --bump PORT
 	 		bump the crates.io dependencies of the specified port
 	EOF"
 	kill -s TERM $$
 )
 
-unset rc
-trap 'return $rc 2> /dev/null; exit $rc' TERM
+unset rc bump
+trap 'trap - 15; return $rc 2> /dev/null; exit $rc' TERM
 shopt -s expand_aliases
 alias die='rc=$?; term'
 
@@ -52,12 +52,12 @@ while (( args > 0 )); do
 			;;
 		-c|--cmd=*)
 			[ "$1" = -c ] && shift
-			cmd="${1#*=}"
+			cmd=${1#*=}
 			shift
 			;;
 		-b|--bump)
 			[ "$1" = -b ] && shift
-			portName="${1#*=}"
+			portName=${1#*=}
 			directory=$(
 				find "$TREE_PATH" -mindepth 3 -maxdepth 3 \
 					-iname "$portName-*.*.recipe" |
@@ -68,7 +68,7 @@ while (( args > 0 )); do
 			shift
 			;;
 		*://*)
-			SOURCE_URI="$1"
+			SOURCE_URI=$1
 			shift
 			;;
 		*-*/*)
@@ -85,9 +85,9 @@ done
 
 mkdir -p "$directory"/download
 cd "$directory" || die "Invalid port directory."
-trap 'cd $OLDPWD; trap - RETURN' EXIT RETURN
+trap 'cd $OLDPWD; trap - 0 RETURN' EXIT RETURN
 
-if [ "$bump" = 1 ]; then
+if [[ $bump -eq 1 ]]; then
 	set -- "$portName"*-*.recipe
 	eval "recipe=\${$#}"
 
@@ -115,7 +115,7 @@ while true; do
 			CHECKSUM_SHA256=1
 			;;
 		$cmd)
-			cmd="$portName"
+			cmd=$portName
 			;;
 		*)
 			break
@@ -133,7 +133,7 @@ done || die "Checksum verification failed."
 
 SOURCE_DIR=$(basename "$(tar --exclude="*/*" -tf download/"$SOURCE_FILENAME")")
 tempdir=$(mktemp -d "$SOURCE_DIR".XXXXXX --tmpdir=/tmp)
-trap 'cd $OLDPWD; keep; trap - RETURN' EXIT RETURN
+trap 'cd $OLDPWD; keep; trap - 0 RETURN' EXIT RETURN
 tar --transform "s|$SOURCE_DIR[^/]*|${tempdir##*/}|" -C /tmp \
 	-xf download/"$SOURCE_FILENAME" --wildcards "$SOURCE_DIR*/Cargo.*" ||
 	die "Invalid tar archive."
@@ -159,14 +159,14 @@ for i in $(seq 0 $(($(wc -l <<< "$info") - 1))); do
 	j=$((i + 2))
 	source_uris+=( "SOURCE_URI_$j=\"${uris[i]}\"" )
 	checksums_sha256+=( "CHECKSUM_SHA256_$j=\"${checksums[i]}\"" )
-	[ "$psd" = 3 ] && source_dirs+=("$(
-		source_filename=$(basename --suffix=.crate "${source_uris[i]}")
-		echo SOURCE_DIR_$j=\""$source_filename"\"
+	[ "$psd" -eq 3 ] && source_dirs+=("$(
+		source_dir=$(basename --suffix=.crate\" "${source_uris[i]}")
+		echo SOURCE_DIR_$j=\""$source_dir"\"
 	)")
 	merged+=( ${source_uris[i]} ${checksums_sha256[i]} ${source_dirs[i]} )
 done
 
-if [ "$bump" = 1 ]; then
+if [[ $bump -eq 1 ]]; then
 	sed -i \
 		-e '/SOURCE_URI_2/,/ARCHITECTURES/ {/^A/!d}' \
 		-e "/^ARCHITECTURES/i $(printf '%s\n' "${merged[@]}" |
